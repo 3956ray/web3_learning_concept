@@ -348,6 +348,168 @@ function withdraw(uint256 amount) public {
 ```
 * 智能合約審計
 * 限制外部合約調用
+
+## **权限控制問題（Unauthorized Access）**
+
+### 定義
+
+在智能合約中，如果**缺乏明確的權限管理**，攻擊者可能執行本不應該被授權的操作，導致資金被提取或合約狀態被篡改。  
+權限控制問題通常出現在以下情況：
+
+- 沒有設置合約管理者或管理者角色；
+    
+- 關鍵函數沒有加上`onlyOwner`或類似的限制；
+    
+- 系統敏感操作依賴單一操作者。
+    
+
+### 經典案例
+
+**案例：Parity Wallet 多重簽名漏洞（2017）**
+
+- **事件簡述**：Parity 的多簽錢包存在一個初始化函數 `initWallet()` 可以被任何人調用，攻擊者利用此漏洞將多簽合約設置為自己擁有者，從而竊取了價值數百萬美元的以太幣。
+    
+- **原因**：權限控制不足，敏感操作未受限於多重簽名或擁有者檢查。
+    
+
+---
+
+### 不安全的權限控制
+
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+contract VulnerableAdmin {
+    address public owner;
+
+    constructor() {
+        owner = msg.sender; // 部署者是初始管理者
+    }
+
+    // 不安全的管理操作，沒有權限檢查
+    function changeOwner(address newOwner) public {
+        owner = newOwner; // 任意人都可以修改 owner
+    }
+
+    function withdraw() public {
+        require(msg.sender == owner, "Only owner can withdraw");
+        payable(owner).transfer(address(this).balance);
+    }
+
+    receive() external payable {}
+}
+```
+
+#### 註解
+
+1. `changeOwner()` 函數沒有做任何權限檢查，任何人都能呼叫，改變合約擁有者。    
+2. 攻擊者可以先呼叫 `changeOwner(attackerAddress)`，然後執行 `withdraw()` 提走所有資金。 
+3. 這是典型的權限控制漏洞。
+### 防禦措施
+
+1. **多重簽名錢包（Multisig）**    
+    - 敏感操作需要多方簽名批准。        
+    - 範例：Gnosis Safe。        
+2. **角色基於訪問控制（RBAC）**    
+    - 使用 OpenZeppelin 的 `AccessControl` 模組，設置不同角色（Admin、Operator、User）。       
+    ```solidity
+    import "@openzeppelin/contracts/access/AccessControl.sol";
+    
+    contract SecureContract is AccessControl {
+        bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
+    
+        constructor() {
+            _setupRole(ADMIN_ROLE, msg.sender);
+        }
+    
+        function criticalFunction() public onlyRole(ADMIN_ROLE) {
+            // 只有 ADMIN_ROLE 可以執行
+        }
+    }
+    ```
+    
+3. **時間鎖（Timelock）**    
+    - 關鍵操作在執行前設置延遲，給團隊時間審查。        
+    - OpenZeppelin TimelockController 可用於延遲策略。
+## **Oracle 攻擊（Oracle Manipulation）**
+
+### 定義
+
+**Oracle 攻擊**是指 DeFi 協議依賴外部數據源（Oracle）提供價格資訊，如果攻擊者能操控 Oracle 提供的數據，就可以操控協議的行為，如：
+
+- 借貸平台的清算價格；    
+- 積分或質押資產價格；    
+- 交易所的滑點或閃電清算
+### 經典案例
+
+**案例：bZx Flash Loan Oracle Manipulation（2020）**
+- **事件簡述**：    
+    - 攻擊者利用閃電貸借款大量資金。        
+    - 通過操縱預言機（Oracle）價格，讓借貸平台錯誤計算資產價值。        
+    - 最終提走價值超過 100 萬美元的資金。        
+- **原因**：    
+    - Oracle 僅依賴單一源或短期市場價格，無法抵抗短時價格操縱。
+### 易受操控的 Oracle
+
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+interface IPriceOracle {
+    function getPrice() external view returns (uint256);
+}
+
+contract VulnerableLending {
+    IPriceOracle public oracle;
+    mapping(address => uint256) public collateral;
+
+    constructor(address _oracle) {
+        oracle = IPriceOracle(_oracle);
+    }
+
+    function depositCollateral() external payable {
+        collateral[msg.sender] += msg.value;
+    }
+
+    function borrow() external {
+        uint256 price = oracle.getPrice();
+        require(collateral[msg.sender] * price >= 1 ether, "Not enough collateral");
+
+        // 發放借款
+        payable(msg.sender).transfer(1 ether);
+    }
+
+    receive() external payable {}
+}
+```
+
+#### 註解
+
+1. `borrow()` 函數依賴 Oracle 價格計算抵押品。    
+2. 如果攻擊者能操縱 `oracle.getPrice()` 返回極低價格，就能在抵押不足的情況下提取資金。
+3. 這是一個典型的 Oracle 攻擊漏洞。
+    
+### 防禦措施
+
+1. **多 Oracle 源**    
+    - 使用 Chainlink 等去中心化預言機，聚合多個價格來源。       
+    ```solidity
+    // Aggregated price oracle
+    uint256 price = (oracle1.getPrice() + oracle2.getPrice() + oracle3.getPrice()) / 3;
+    ```
+    
+2. **價格驗證**
+    - 對價格進行驗證，檢查是否異常。
+    - 可以設置最大價格波動限制。        
+3. **時間加權平均（TWAP, Time-Weighted Average Price）**    
+    - 用一段時間內的平均價格，減少短期市場操控影響。        
+    - 例如：       
+    ```solidity
+    uint256 twapPrice = (priceNow + price1HourAgo + price2HoursAgo) / 3;
+    ```
+4. **閃電貸檢測**    
+    - 對單筆交易的大額資金進行警告或限制，降低 Oracle 被短時操控的風險。
 ## 參考文獻
 [1] https://xrex.io/tw/zh/blog/beginner-s-guide/what-is-defi-decentralized-finance-pros-and-cons-zh/
 [2] https://www.coinbase.com/zh-tw/learn/crypto-basics/what-is-defi
